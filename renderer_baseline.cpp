@@ -1,0 +1,311 @@
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <vector>
+#include <algorithm>
+
+struct Vector3 {
+    double x, y, z;
+
+    Vector3() : x(0), y(0), z(0) {}
+    Vector3(double x_, double y_, double z_) : x(x_), y(y_), z(z_) {}
+
+    Vector3 operator+(const Vector3& other) const {
+        return Vector3(x + other.x, y + other.y, z + other.z);
+    }
+
+    Vector3 operator-(const Vector3& other) const {
+        return Vector3(x - other.x, y - other.y, z - other.z);
+    }
+
+    Vector3 operator*(double s) const {
+        return Vector3(x * s, y * s, z * s);
+    }
+
+    Vector3 operator/(double s) const {
+        return Vector3(x / s, y / s, z / s);
+    }
+
+    Vector3 operator*(const Vector3& other) const {
+        return Vector3(x * other.x, y * other.y, z * other.z);
+    }
+
+    double dot(const Vector3& other) const {
+        return x * other.x + y * other.y + z * other.z;
+    }
+
+    Vector3 cross(const Vector3& other) const {
+        return Vector3(
+            y * other.z - z * other.y,
+            z * other.x - x * other.z,
+            x * other.y - y * other.x
+        );
+    }
+
+    double lengthSquared() const {
+        return x * x + y * y + z * z;
+    }
+
+    double length() const {
+        return std::sqrt(lengthSquared());
+    }
+
+    Vector3 normalized() const {
+        double len = length();
+        if (len < 1e-12) return *this;
+        return *this / len;
+    }
+};
+
+struct Material {
+    Vector3 albedo;
+    Vector3 emission;
+};
+
+struct Triangle {
+    Vector3 v0, v1, v2;
+    int materialIdx;
+};
+
+struct HitInfo {
+    bool hit;
+    double t;
+    int triIdx;
+    Vector3 point;
+    Vector3 normal;
+};
+
+struct Camera {
+    Vector3 pos;
+    Vector3 lookAt;
+    Vector3 up;
+    double fov;
+    int width;
+    int height;
+
+    Vector3 getRayDir(double u, double v) const {
+        double aspect = (double)width / (double)height;
+        double theta = fov * 3.14159265358979323846 / 180.0;
+        double halfHeight = std::tan(theta * 0.5);
+        double halfWidth = aspect * halfHeight;
+
+        Vector3 w = (pos - lookAt).normalized();
+        Vector3 uVec = up.cross(w).normalized();
+        Vector3 vVec = w.cross(uVec);
+
+        double screenX = (2.0 * u - 1.0) * halfWidth;
+        double screenY = (1.0 - 2.0 * v) * halfHeight;
+
+        return (uVec * screenX + vVec * screenY - w).normalized();
+    }
+};
+
+enum class RenderMode {
+    Flat,
+    Normal,
+    DirectLighting
+};
+
+bool intersectTriangle(const Vector3& origin,
+                       const Vector3& dir,
+                       const Vector3& v0,
+                       const Vector3& v1,
+                       const Vector3& v2,
+                       double& t) {
+    const double EPS = 1e-8;
+
+    Vector3 edge1 = v1 - v0;
+    Vector3 edge2 = v2 - v0;
+    Vector3 h = dir.cross(edge2);
+    double a = edge1.dot(h);
+
+    if (std::fabs(a) < EPS) return false;
+
+    double f = 1.0 / a;
+    Vector3 s = origin - v0;
+    double u = f * s.dot(h);
+    if (u < 0.0 || u > 1.0) return false;
+
+    Vector3 q = s.cross(edge1);
+    double v = f * dir.dot(q);
+    if (v < 0.0 || u + v > 1.0) return false;
+
+    t = f * edge2.dot(q);
+    return t > EPS;
+}
+
+Vector3 triangleNormal(const Triangle& tri) {
+    Vector3 e1 = tri.v1 - tri.v0;
+    Vector3 e2 = tri.v2 - tri.v0;
+    return e1.cross(e2).normalized();
+}
+
+HitInfo intersectScene(const Vector3& origin,
+                       const Vector3& dir,
+                       const std::vector<Triangle>& triangles) {
+    HitInfo result;
+    result.hit = false;
+    result.t = std::numeric_limits<double>::max();
+    result.triIdx = -1;
+
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        double t;
+        if (intersectTriangle(origin, dir,
+                              triangles[i].v0,
+                              triangles[i].v1,
+                              triangles[i].v2,
+                              t)) {
+            if (t > 1e-6 && t < result.t) {
+                result.hit = true;
+                result.t = t;
+                result.triIdx = (int)i;
+            }
+        }
+    }
+
+    if (result.hit) {
+        const Triangle& tri = triangles[result.triIdx];
+        result.point = origin + dir * result.t;
+        result.normal = triangleNormal(tri);
+    }
+
+    return result;
+}
+
+Vector3 shadeFlat(const HitInfo& hit,
+                  const std::vector<Triangle>& triangles,
+                  const std::vector<Material>& materials) {
+    const Triangle& tri = triangles[hit.triIdx];
+    const Material& mat = materials[tri.materialIdx];
+    return mat.albedo;
+}
+
+Vector3 shadeNormal(const HitInfo& hit) {
+    return (hit.normal + Vector3(1.0, 1.0, 1.0)) * 0.5;
+}
+
+Vector3 shadeDirectLighting(const HitInfo& hit,
+                            const std::vector<Triangle>& triangles,
+                            const std::vector<Material>& materials) {
+    const Triangle& tri = triangles[hit.triIdx];
+    const Material& mat = materials[tri.materialIdx];
+
+    Vector3 lightDir = Vector3(1.0, 1.0, 1.0).normalized();
+    double intensity = std::max(0.0, hit.normal.dot(lightDir));
+
+    Vector3 ambient(0.1, 0.1, 0.1);
+    Vector3 diffuse = mat.albedo * intensity;
+
+    return ambient + diffuse;
+}
+
+uint8_t toByte(double x) {
+    x = std::max(0.0, std::min(1.0, x));
+    return (uint8_t)(x * 255.0 + 0.5);
+}
+
+void writePPM(const std::string& filename,
+              const std::vector<uint8_t>& image,
+              int width,
+              int height) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) {
+        std::cerr << "Failed to open " << filename << "\n";
+        return;
+    }
+
+    out << "P6\n" << width << " " << height << "\n255\n";
+    out.write(reinterpret_cast<const char*>(image.data()), image.size());
+    out.close();
+}
+
+int main() {
+    const int width = 400;
+    const int height = 400;
+    RenderMode mode = RenderMode::DirectLighting;
+
+    Camera cam;
+    cam.pos = Vector3(0.0, 1.0, 3.5);
+    cam.lookAt = Vector3(0.0, 0.8, 0.0);
+    cam.up = Vector3(0.0, 1.0, 0.0);
+    cam.fov = 60.0;
+    cam.width = width;
+    cam.height = height;
+
+    std::vector<Material> materials;
+    int matRed = (int)materials.size();
+    materials.push_back({Vector3(1.0, 0.2, 0.2), Vector3(0.0, 0.0, 0.0)});
+
+    int matGreen = (int)materials.size();
+    materials.push_back({Vector3(0.2, 1.0, 0.2), Vector3(0.0, 0.0, 0.0)});
+
+    int matBlue = (int)materials.size();
+    materials.push_back({Vector3(0.2, 0.2, 1.0), Vector3(0.0, 0.0, 0.0)});
+
+    std::vector<Triangle> triangles;
+    triangles.push_back({
+        Vector3(-1.2, 0.0, -0.5),
+        Vector3(1.2, 0.0, -0.5),
+        Vector3(0.0, 1.5, -0.5),
+        matRed
+    });
+
+    triangles.push_back({
+        Vector3(-1.5, -0.5, -1.5),
+        Vector3(-0.2, 1.0, -1.0),
+        Vector3(-1.0, 0.2, 0.8),
+        matGreen
+    });
+
+    triangles.push_back({
+        Vector3(0.4, -0.3, -1.2),
+        Vector3(1.5, 0.8, -0.8),
+        Vector3(0.8, 0.3, 0.7),
+        matBlue
+    });
+
+    std::vector<uint8_t> image(width * height * 3, 0);
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            double u = (x + 0.5) / (double)width;
+            double v = (y + 0.5) / (double)height;
+
+            Vector3 dir = cam.getRayDir(u, v);
+            HitInfo hit = intersectScene(cam.pos, dir, triangles);
+
+            Vector3 color(0.0, 0.0, 0.0);
+
+            if (hit.hit) {
+    if (mode == RenderMode::Flat) {
+        color = shadeFlat(hit, triangles, materials);
+    } else if (mode == RenderMode::Normal) {
+        color = shadeNormal(hit);
+    } else if (mode == RenderMode::DirectLighting) {
+        color = shadeDirectLighting(hit, triangles, materials);
+    }
+}
+            
+
+            int idx = (y * width + x) * 3;
+            image[idx + 0] = toByte(color.x);
+            image[idx + 1] = toByte(color.y);
+            image[idx + 2] = toByte(color.z);
+        }
+    }
+
+   if (mode == RenderMode::Flat) {
+    writePPM("flat.ppm", image, width, height);
+    std::cout << "Saved flat.ppm\n";
+} else if (mode == RenderMode::Normal) {
+    writePPM("normal.ppm", image, width, height);
+    std::cout << "Saved normal.ppm\n";
+} else if (mode == RenderMode::DirectLighting) {
+    writePPM("direct.ppm", image, width, height);
+    std::cout << "Saved direct.ppm\n";
+}
+
+    return 0;
+}
