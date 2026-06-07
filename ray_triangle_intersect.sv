@@ -2,8 +2,8 @@
 
 module ray_triangle_intersect
 #(
-    parameter FRAC = 16,                  // fractional bits (Q16.16)
-    parameter logic signed [31:0] EPSILON = 32'sd1
+    parameter FRAC = 16,                          // fractional bits (Q16.16)
+    parameter logic signed [31:0] EPSILON = 32'sd1   // tolerance ~ 1.5e-5
 ) (
     input  logic         clk,
     input  logic         rst_n,
@@ -20,11 +20,13 @@ module ray_triangle_intersect
 
     // Outputs
     output logic         hit,
-    output logic signed [31:0] t,
-    output logic         ready
+    output logic signed [31:0] t,         // intersection distance, Q16.16
+    output logic         ready            // high when outputs are valid
 );
 
+    //--------------------------------------------------------------
     // FSM States
+    //--------------------------------------------------------------
     typedef enum logic [3:0] {
         S_IDLE,
         S_H_CROSS,
@@ -37,21 +39,22 @@ module ray_triangle_intersect
         S_DIV_STEP,
         S_DONE
     } state_t;
-
     state_t state;
 
-    // Internal registers
+    // Internal Registers
     logic signed [31:0] rd_x_r,  rd_y_r,  rd_z_r;
     logic signed [31:0] edge1_x, edge1_y, edge1_z;
     logic signed [31:0] edge2_x, edge2_y, edge2_z;
     logic signed [31:0] s_x,     s_y,     s_z;
+
     logic signed [31:0] h_x, h_y, h_z;
     logic signed [31:0] q_x, q_y, q_z;
     logic signed [31:0] a, u, v, t_num;
 
-    // Shared vector math units
+    // Shared Vector Math Units (Combinational)
     logic signed [31:0] vec_a_x, vec_a_y, vec_a_z;
     logic signed [31:0] vec_b_x, vec_b_y, vec_b_z;
+
     logic signed [31:0] cross_out_x, cross_out_y, cross_out_z;
     logic signed [31:0] dot_out;
 
@@ -65,70 +68,62 @@ module ray_triangle_intersect
         end
     endfunction
 
-    // Shared cross product
+    // Single Cross-Product Unit
     assign cross_out_x = mul_q16(vec_a_y, vec_b_z) - mul_q16(vec_a_z, vec_b_y);
     assign cross_out_y = mul_q16(vec_a_z, vec_b_x) - mul_q16(vec_a_x, vec_b_z);
     assign cross_out_z = mul_q16(vec_a_x, vec_b_y) - mul_q16(vec_a_y, vec_b_x);
 
-    // Shared dot product
+    // Single Dot-Product Unit
     assign dot_out = mul_q16(vec_a_x, vec_b_x) +
                      mul_q16(vec_a_y, vec_b_y) +
                      mul_q16(vec_a_z, vec_b_z);
 
-    // Select math inputs depending on state
     always_comb begin
-        vec_a_x = 32'sd0; vec_a_y = 32'sd0; vec_a_z = 32'sd0;
-        vec_b_x = 32'sd0; vec_b_y = 32'sd0; vec_b_z = 32'sd0;
+        vec_a_x = 32'd0; vec_a_y = 32'd0; vec_a_z = 32'd0;
+        vec_b_x = 32'd0; vec_b_y = 32'd0; vec_b_z = 32'd0;
 
         case (state)
             S_H_CROSS: begin
                 vec_a_x = rd_x_r;  vec_a_y = rd_y_r;  vec_a_z = rd_z_r;
                 vec_b_x = edge2_x; vec_b_y = edge2_y; vec_b_z = edge2_z;
             end
-
             S_A_DOT: begin
                 vec_a_x = edge1_x; vec_a_y = edge1_y; vec_a_z = edge1_z;
                 vec_b_x = h_x;     vec_b_y = h_y;     vec_b_z = h_z;
             end
-
             S_U_DOT: begin
                 vec_a_x = s_x;     vec_a_y = s_y;     vec_a_z = s_z;
                 vec_b_x = h_x;     vec_b_y = h_y;     vec_b_z = h_z;
             end
-
             S_Q_CROSS: begin
                 vec_a_x = s_x;     vec_a_y = s_y;     vec_a_z = s_z;
                 vec_b_x = edge1_x; vec_b_y = edge1_y; vec_b_z = edge1_z;
             end
-
             S_V_DOT: begin
                 vec_a_x = rd_x_r;  vec_a_y = rd_y_r;  vec_a_z = rd_z_r;
                 vec_b_x = q_x;     vec_b_y = q_y;     vec_b_z = q_z;
             end
-
             S_T_DOT: begin
                 vec_a_x = edge2_x; vec_a_y = edge2_y; vec_a_z = edge2_z;
                 vec_b_x = q_x;     vec_b_y = q_y;     vec_b_z = q_z;
             end
-
             default: ;
         endcase
     end
 
-    // Early-exit checks
+    // Combinational condition checks for early exit
     logic a_is_zero;
-    logic u_ok;
-    logic v_ok;
-
     assign a_is_zero = (dot_out > -EPSILON) && (dot_out < EPSILON);
 
-    assign u_ok = ((a > 0) && (dot_out >= 0) && (dot_out <= a)) ||
-                  ((a < 0) && (dot_out <= 0) && (dot_out >= a));
+    logic u_ok;
+    assign u_ok = (a > 0 && (dot_out >= 0 && dot_out <= a)) ||
+                  (a < 0 && (dot_out <= 0 && dot_out >= a));
 
-    assign v_ok = ((a > 0) && (dot_out >= 0) && (dot_out <= a) && ((u + dot_out) <= a)) ||
-                  ((a < 0) && (dot_out <= 0) && (dot_out >= a) && ((u + dot_out) >= a));
+    logic v_ok;
+    assign v_ok = (a > 0 && (dot_out >= 0 && dot_out <= a && (u + dot_out) <= a)) ||
+                  (a < 0 && (dot_out <= 0 && dot_out >= a && (u + dot_out) >= a));
 
-    // Sequential divider registers
+    // Sequential Divider Registers
     logic [63:0] div_num;
     logic [63:0] div_den;
     logic [63:0] div_rem;
@@ -140,24 +135,23 @@ module ray_triangle_intersect
     assign next_rem = {div_rem[62:0], div_num[63]};
 
     logic signed [31:0] final_t;
-    assign final_t = div_sign ? -$signed(div_quot[31:0]) : $signed(div_quot[31:0]);
+    assign final_t = div_sign ? -div_quot[31:0] : div_quot[31:0];
 
     // Main FSM
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= S_IDLE;
-
             ready <= 1'b0;
             hit   <= 1'b0;
-            t     <= 32'sd0;
+            t     <= 32'd0;
 
-            rd_x_r  <= 32'sd0; rd_y_r  <= 32'sd0; rd_z_r  <= 32'sd0;
-            edge1_x <= 32'sd0; edge1_y <= 32'sd0; edge1_z <= 32'sd0;
-            edge2_x <= 32'sd0; edge2_y <= 32'sd0; edge2_z <= 32'sd0;
-            s_x     <= 32'sd0; s_y     <= 32'sd0; s_z     <= 32'sd0;
-            h_x     <= 32'sd0; h_y     <= 32'sd0; h_z     <= 32'sd0;
-            q_x     <= 32'sd0; q_y     <= 32'sd0; q_z     <= 32'sd0;
-            a       <= 32'sd0; u       <= 32'sd0; v       <= 32'sd0; t_num <= 32'sd0;
+            rd_x_r  <= 32'd0; rd_y_r  <= 32'd0; rd_z_r  <= 32'd0;
+            edge1_x <= 32'd0; edge1_y <= 32'd0; edge1_z <= 32'd0;
+            edge2_x <= 32'd0; edge2_y <= 32'd0; edge2_z <= 32'd0;
+            s_x     <= 32'd0; s_y     <= 32'd0; s_z     <= 32'd0;
+            h_x     <= 32'd0; h_y     <= 32'd0; h_z     <= 32'd0;
+            q_x     <= 32'd0; q_y     <= 32'd0; q_z     <= 32'd0;
+            a       <= 32'd0; u       <= 32'd0; v       <= 32'd0; t_num <= 32'd0;
 
             div_num   <= 64'd0;
             div_den   <= 64'd0;
@@ -165,17 +159,15 @@ module ray_triangle_intersect
             div_quot  <= 64'd0;
             div_count <= 7'd0;
             div_sign  <= 1'b0;
-
         end else begin
             case (state)
-
                 S_IDLE: begin
                     ready <= 1'b0;
                     hit   <= 1'b0;
-                    t     <= 32'sd0;
+                    t     <= 32'd0;
 
                     if (valid) begin
-                        // Latch ray and precompute linear vectors
+                        // Latch and pre-calculate linear vectors to save cycles
                         rd_x_r  <= ray_dir_x;
                         rd_y_r  <= ray_dir_y;
                         rd_z_r  <= ray_dir_z;
@@ -207,7 +199,7 @@ module ray_triangle_intersect
                     a <= dot_out;
                     if (a_is_zero) begin
                         hit <= 1'b0;
-                        t   <= 32'sd0;
+                        t   <= 32'd0;
                         state <= S_DONE;
                     end else begin
                         state <= S_U_DOT;
@@ -220,7 +212,7 @@ module ray_triangle_intersect
                         state <= S_Q_CROSS;
                     end else begin
                         hit <= 1'b0;
-                        t   <= 32'sd0;
+                        t   <= 32'd0;
                         state <= S_DONE;
                     end
                 end
@@ -238,7 +230,7 @@ module ray_triangle_intersect
                         state <= S_T_DOT;
                     end else begin
                         hit <= 1'b0;
-                        t   <= 32'sd0;
+                        t   <= 32'd0;
                         state <= S_DONE;
                     end
                 end
@@ -249,18 +241,16 @@ module ray_triangle_intersect
                 end
 
                 S_DIV_START: begin
-                    // Prepare sequential divider
-                    div_num   <= {32'd0, (t_num[31] ? -t_num : t_num)} << FRAC;
-                    div_den   <= {32'd0, (a[31] ? -a : a)};
-                    div_rem   <= 64'd0;
-                    div_quot  <= 64'd0;
-                    div_count <= 7'd50;
-                    div_sign  <= t_num[31] ^ a[31];
+                    div_num <= {32'd0, t_num[31] ? -t_num : t_num} << FRAC;
+                    div_den <= {32'd0, a[31] ? -a : a};
+                    div_rem <= 64'd0;
+                    div_quot <= 64'd0;
+                    div_count <= 7'd64;
+                    div_sign <= t_num[31] ^ a[31];
 
-                    // If denominator somehow becomes zero, just fail cleanly
                     if (a == 0) begin
                         hit <= 1'b0;
-                        t   <= 32'sd0;
+                        t   <= 32'd0;
                         state <= S_DONE;
                     end else begin
                         state <= S_DIV_STEP;
@@ -268,9 +258,13 @@ module ray_triangle_intersect
                 end
 
                 S_DIV_STEP: begin
-                    if (div_count != 0) begin
-                        div_num <= {div_num[62:0], 1'b0};
-
+                    if (div_count == 0) begin
+                        t <= final_t;
+                        if (final_t > EPSILON) hit <= 1'b1;
+                        else                   hit <= 1'b0;
+                        state <= S_DONE;
+                    end else begin
+                        // Standard Restoring Division
                         if (next_rem >= div_den) begin
                             div_rem  <= next_rem - div_den;
                             div_quot <= {div_quot[62:0], 1'b1};
@@ -278,30 +272,20 @@ module ray_triangle_intersect
                             div_rem  <= next_rem;
                             div_quot <= {div_quot[62:0], 1'b0};
                         end
-
-                        div_count <= div_count - 1'b1;
-                    end else begin
-                        t <= final_t;
-
-                        if (final_t > EPSILON) begin
-                            hit <= 1'b1;
-                        end else begin
-                            hit <= 1'b0;
-                        end
-
-                        state <= S_DONE;
+                        div_num   <= {div_num[62:0], 1'b0};
+                        div_count <= div_count - 1;
                     end
                 end
 
                 S_DONE: begin
                     ready <= 1'b1;
-                    state <= S_IDLE;
+                    state <= S_IDLE; // External SM detects ready on the next cycle edge
                 end
 
                 default: begin
                     ready <= 1'b0;
                     hit   <= 1'b0;
-                    t     <= 32'sd0;
+                    t     <= 32'd0;
                     state <= S_IDLE;
                 end
             endcase
